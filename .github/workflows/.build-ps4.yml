@@ -1,0 +1,80 @@
+name: Build PS4
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  ps4:
+    runs-on: ubuntu-24.04
+    env:
+      OPENORBIS_VERSION: v0.5.4
+      OPENORBIS_SHA256: 3c7cd5bb593ca74fa1c13fd59f3938dc0fc07985167f7275063019e63abe4526
+      DOTNET_ROLL_FORWARD: Major
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Arrange files into project layout
+        run: |
+          mkdir -p ps4/src ps4/include ps4/tools tests
+          mv main.cpp ps4/src/
+          mv ds4_controls.h avplayer_abi.h ps4/include/
+          mv gen_icon.py validate_sfo.py ps4/tools/
+          mv Makefile ps4/Makefile
+          mv ds4_controls_test.cpp tests/
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 lld-18 python3 curl tar
+
+      - name: Test DualShock 4 input mappings
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -Ips4/include tests/ds4_controls_test.cpp -o /tmp/ds4t
+          /tmp/ds4t
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Download pinned OpenOrbis toolchain
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/openorbis.tar.gz"
+          curl --fail --location --retry 3 "https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/${OPENORBIS_VERSION}/toolchain-llvm-18.tar.gz" --output "$archive"
+          echo "${OPENORBIS_SHA256}  ${archive}" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/openorbis"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/openorbis"
+          toolchain="$(find "$RUNNER_TEMP/openorbis" -type f -name link.x -print -quit | xargs dirname)"
+          test -n "$toolchain"
+          echo "OO_PS4_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
+
+      - name: Install libssl1.1 (required by OpenOrbis PkgTool)
+        run: |
+          ok=0
+          for url in \
+            http://security.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2.24_amd64.deb \
+            http://archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2.24_amd64.deb \
+            http://archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2_amd64.deb; do
+            if curl -fsSL "$url" -o /tmp/libssl1.1.deb && sudo dpkg -i /tmp/libssl1.1.deb; then ok=1; break; fi
+          done
+          if [ "$ok" != 1 ]; then
+            echo "::warning::libssl1.1 download failed; trying OpenSSL 3 override"
+            echo "CLR_OPENSSL_VERSION_OVERRIDE=3" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build ELF, eboot.bin, SFO and FPKG
+        run: |
+          mkdir -p out
+          set -o pipefail
+          make -C ps4 clean all CC=clang-18 CCX=clang++-18 LD=ld.lld-18 2>&1 | tee out/build.log
+          pkg="$(find ps4 -maxdepth 1 -type f -name "*.pkg" -print -quit)"
+          test -s "$pkg"
+          python3 ps4/tools/validate_sfo.py ps4/sce_sys/param.sfo
+          cp "$pkg" out/PhoneCast-PS4.pkg
+
+      - name: Upload outputs and build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PhoneCast-PS4
+          path: out/
+          if-no-files-found: warn
