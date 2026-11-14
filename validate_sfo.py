@@ -19,9 +19,11 @@ def read_sfo(path):
         key = data[key_start:key_end].decode("utf-8")
         start = value_offset + value_rel
         raw = data[start:start + length]
-        if value_type == 0x0404:
+        # PSF types: 0x0004 = UTF-8 special, 0x0204 = UTF-8 text (NUL padded),
+        # 0x0404 = 32-bit integer.
+        if value_type in (0x0004, 0x0204):
             values[key] = raw.rstrip(b"\0").decode("utf-8")
-        elif value_type == 0x0402 and length in (1, 2, 4, 8):
+        elif value_type == 0x0404 and length in (1, 2, 4, 8):
             values[key] = int.from_bytes(raw, "little")
         else:
             values[key] = raw
