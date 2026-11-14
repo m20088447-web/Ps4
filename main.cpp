@@ -1,5 +1,15 @@
+// OpenOrbis' libc headers do not declare nanosleep(), but libc++'s threading
+// support (pulled in by <algorithm>/<memory>) references it. Declare it first.
+#include <time.h>
+extern "C" int nanosleep(const struct timespec *, struct timespec *);
+
 #include <SDL.h>
 
+#if __has_include(<orbis/Net.h>)
+#include <orbis/Net.h>
+#else
+extern "C" int sceNetInit(void);
+#endif
 #include <orbis/NetCtl.h>
 #include <orbis/Pad.h>
 #include <orbis/Sysmodule.h>
