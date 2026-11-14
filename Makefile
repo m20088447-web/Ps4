@@ -31,7 +31,7 @@ CREATE_GP4  := $(TOOLCHAIN)/bin/$(CDIR)/create-gp4
 CREATE_FSELF:= $(TOOLCHAIN)/bin/$(CDIR)/create-fself
 
 LIBS        := -lc -lkernel -lc++ -lSceUserService -lSceVideoOut \
-               -lScePad -lSceSysmodule -lSceNet -lSceNetCtl \
+               -lScePad -lSceSysmodule -lSceAudioOut -lSceNet -lSceNetCtl \
                -lSceAvPlayer -lSDL2
 COMMON_CXXFLAGS := --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables \
                    -O2 -Wall -Wextra -Wno-unused-parameter \
