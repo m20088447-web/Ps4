@@ -8,6 +8,18 @@ ifeq ($(strip $(TOOLCHAIN)),)
 $(error Set OO_PS4_TOOLCHAIN to an extracted OpenOrbis PS4 Toolchain v0.5.4 directory)
 endif
 
+# Locate the SDL2 headers/libs shipped inside the OpenOrbis toolchain. The
+# directory layout differs between releases, so search instead of hard-coding.
+SDL_HEADER  := $(firstword $(shell find "$(TOOLCHAIN)/include" "$(TOOLCHAIN)/samples" -name SDL.h 2>/dev/null))
+SDL_INC     := $(patsubst %/SDL.h,%,$(SDL_HEADER))
+ifeq ($(strip $(SDL_INC)),)
+$(error SDL.h not found under $(TOOLCHAIN)/include or $(TOOLCHAIN)/samples)
+endif
+SDL_LIBFILE := $(firstword $(shell find "$(TOOLCHAIN)/lib" "$(TOOLCHAIN)/samples" \( -name 'libSDL2.a' -o -name 'libSDL2.so' -o -name 'libSDL2.prx' \) 2>/dev/null))
+SDL_LIBDIR  := $(patsubst %/,%,$(dir $(SDL_LIBFILE)))
+$(info SDL include dir: $(SDL_INC))
+$(info SDL library file: $(SDL_LIBFILE))
+
 PROJDIR     := $(CURDIR)
 INTDIR      := build
 CDIR        := linux
@@ -24,9 +36,9 @@ LIBS        := -lc -lkernel -lc++ -lSceUserService -lSceVideoOut \
 COMMON_CXXFLAGS := --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables \
                    -O2 -Wall -Wextra -Wno-unused-parameter \
                    -isysroot $(TOOLCHAIN) -isystem $(TOOLCHAIN)/include \
-                   -isystem $(TOOLCHAIN)/include/c++/v1 -Iinclude -std=c++17
+                   -isystem $(TOOLCHAIN)/include/c++/v1 -isystem $(SDL_INC) -Iinclude -std=c++17
 LDFLAGS     := -m elf_x86_64 -pie --script $(TOOLCHAIN)/link.x --eh-frame-hdr \
-               -L$(TOOLCHAIN)/lib $(LIBS) $(TOOLCHAIN)/lib/crt1.o
+               -L$(TOOLCHAIN)/lib $(if $(SDL_LIBDIR),-L$(SDL_LIBDIR)) $(LIBS) $(TOOLCHAIN)/lib/crt1.o
 OBJECTS     := $(INTDIR)/main.o
 MODULES_SRC := $(TOOLCHAIN)/samples/SDL2/sce_module
 MODULES     = $(wildcard sce_module/*)
