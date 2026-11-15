@@ -260,11 +260,33 @@ bool beginPlayer(const std::string &phoneIp) {
         g_status = "SceAvPlayer initialization failed.";
         return false;
     }
-    char url[128];
+    // AvPlayer may keep the URL pointer, so give it storage that outlives this call.
+    static char url[128];
     snprintf(url, sizeof(url), "http://%s:%u/phonecast.m3u8", phoneIp.c_str(), kHttpPort);
-    const int result = sceAvPlayerAddSourceEx(g_player, PHONECAST_AVPLAYER_SOURCE_HLS, url);
+
+    // Try the plain AddSource first (the player detects HLS itself), then the
+    // Ex variant with a proper source-details struct.
+    int32_t simpleResult = -1;
+    int32_t result = -1;
+    if (sceAvPlayerAddSource) {
+        simpleResult = sceAvPlayerAddSource(g_player, url);
+        result = simpleResult;
+    }
     if (result < 0) {
-        g_status = "Could not open the Android HLS playlist.";
+        SceAvPlayerSourceDetails details;
+        memset(&details, 0, sizeof(details));
+        details.uri.name = url;
+        details.uri.length = static_cast<uint32_t>(strlen(url));
+        details.sourceType = PHONECAST_AVPLAYER_SOURCE_HLS;
+        result = sceAvPlayerAddSourceEx(g_player, PHONECAST_AVPLAYER_URI_TYPE_SOURCE, &details);
+    }
+    if (result < 0) {
+        char message[160];
+        snprintf(message, sizeof(message),
+                 "Could not open the Android HLS playlist (AddSource 0x%08x, Ex 0x%08x).",
+                 static_cast<unsigned>(simpleResult), static_cast<unsigned>(result));
+        g_status = message;
+        printf("%s\n", message);
         stopPlayer();
         return false;
     }
@@ -383,6 +405,9 @@ void drawVideo() {
     if (!g_videoTexture || g_videoWidth <= 0 || g_videoHeight <= 0) {
         drawText("CONNECTING TO ANDROID", 112, 112, 3, Rgb{0, 217, 245});
         drawText(g_status, 112, 180, 1, Rgb{215, 229, 239});
+        const bool active = g_player && sceAvPlayerIsActive(g_player);
+        drawText(std::string("AVPLAYER: ") + (active ? "ACTIVE, WAITING FOR VIDEO" : "NOT ACTIVE") +
+                 "   PHONE: " + g_phoneIp, 112, 230, 1, Rgb{153, 177, 196});
         drawText("CIRCLE TO RETURN TO MENU", 112, 980, 1, Rgb{125, 153, 175});
         return;
     }

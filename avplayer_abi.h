@@ -87,8 +87,23 @@ typedef struct SceAvPlayerFrameInfoEx {
     SceAvPlayerStreamDetailsEx details;
 } SceAvPlayerFrameInfoEx;
 
+typedef struct SceAvPlayerUri {
+    const char *name;
+    uint32_t length;
+} SceAvPlayerUri;
+
+// Argument of sceAvPlayerAddSourceEx (128 bytes).
+typedef struct SceAvPlayerSourceDetails {
+    SceAvPlayerUri uri;
+    uint8_t reserved1[64];
+    int32_t sourceType;
+    uint8_t reserved2[44];
+} SceAvPlayerSourceDetails;
+
 SceAvPlayerHandle sceAvPlayerInit(SceAvPlayerInitData *data);
-int32_t sceAvPlayerAddSourceEx(SceAvPlayerHandle handle, int32_t sourceType, const char *source);
+// Weak: if a toolchain stub lacks it the pointer is null and callers skip it.
+int32_t sceAvPlayerAddSource(SceAvPlayerHandle handle, const char *url) __attribute__((weak));
+int32_t sceAvPlayerAddSourceEx(SceAvPlayerHandle handle, int32_t uriType, SceAvPlayerSourceDetails *details);
 int32_t sceAvPlayerClose(SceAvPlayerHandle handle);
 int32_t sceAvPlayerGetVideoDataEx(SceAvPlayerHandle handle, SceAvPlayerFrameInfoEx *frameInfo);
 int32_t sceAvPlayerStop(SceAvPlayerHandle handle);
@@ -97,5 +112,6 @@ uint8_t sceAvPlayerIsActive(SceAvPlayerHandle handle);
 }
 
 #define PHONECAST_AVPLAYER_DEBUG_NONE 0
+#define PHONECAST_AVPLAYER_URI_TYPE_SOURCE 0
 #define PHONECAST_AVPLAYER_SOURCE_HLS 8
 
