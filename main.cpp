@@ -264,34 +264,53 @@ bool beginPlayer(const std::string &phoneIp) {
     static char url[128];
     snprintf(url, sizeof(url), "http://%s:%u/phonecast.m3u8", phoneIp.c_str(), kHttpPort);
 
-    // Try the plain AddSource first (the player detects HLS itself), then the
-    // Ex variant with a proper source-details struct.
-    int32_t simpleResult = -1;
+    // The exact AddSourceEx argument values differ between documentation and
+    // firmware, so try the plain AddSource (if the toolchain stub has it) and
+    // then each known uriType/sourceType combination until one is accepted.
     int32_t result = -1;
+    int usedUriType = -1;
+    int usedSourceType = -1;
+    bool usedSimple = false;
+    int attempts = 0;
     if (sceAvPlayerAddSource) {
-        simpleResult = sceAvPlayerAddSource(g_player, url);
-        result = simpleResult;
+        ++attempts;
+        result = sceAvPlayerAddSource(g_player, url);
+        usedSimple = result >= 0;
     }
-    if (result < 0) {
-        SceAvPlayerSourceDetails details;
-        memset(&details, 0, sizeof(details));
-        details.uri.name = url;
-        details.uri.length = static_cast<uint32_t>(strlen(url));
-        details.sourceType = PHONECAST_AVPLAYER_SOURCE_HLS;
-        result = sceAvPlayerAddSourceEx(g_player, PHONECAST_AVPLAYER_URI_TYPE_SOURCE, &details);
+    static const int kUriTypes[] = {0, 1, 2};
+    static const int kSourceTypes[] = {PHONECAST_AVPLAYER_SOURCE_HLS, 0, 3, 2, 1, 4, 5, 6, 7, 9};
+    for (size_t u = 0; result < 0 && u < sizeof(kUriTypes) / sizeof(kUriTypes[0]); ++u) {
+        for (size_t t = 0; result < 0 && t < sizeof(kSourceTypes) / sizeof(kSourceTypes[0]); ++t) {
+            SceAvPlayerSourceDetails details;
+            memset(&details, 0, sizeof(details));
+            details.uri.name = url;
+            details.uri.length = static_cast<uint32_t>(strlen(url));
+            details.sourceType = kSourceTypes[t];
+            ++attempts;
+            result = sceAvPlayerAddSourceEx(g_player, kUriTypes[u], &details);
+            printf("AddSourceEx uriType=%d sourceType=%d -> 0x%08x\n", kUriTypes[u], kSourceTypes[t],
+                   static_cast<unsigned>(result));
+            if (result >= 0) {
+                usedUriType = kUriTypes[u];
+                usedSourceType = kSourceTypes[t];
+            }
+        }
     }
     if (result < 0) {
         char message[160];
         snprintf(message, sizeof(message),
-                 "Could not open the Android HLS playlist (AddSource 0x%08x, Ex 0x%08x).",
-                 static_cast<unsigned>(simpleResult), static_cast<unsigned>(result));
+                 "Could not open the Android HLS playlist (last 0x%08x after %d tries).",
+                 static_cast<unsigned>(result), attempts);
         g_status = message;
         printf("%s\n", message);
         stopPlayer();
         return false;
     }
+    char how[64];
+    if (usedSimple) snprintf(how, sizeof(how), "AddSource");
+    else snprintf(how, sizeof(how), "Ex type %d/%d", usedUriType, usedSourceType);
     g_phoneIp = phoneIp;
-    g_status = "Connecting to " + phoneIp;
+    g_status = "Connecting to " + phoneIp + " (" + how + ")";
     g_page = PAGE_PLAYING;
     g_fpsWindowStart = SDL_GetTicks();
     g_frames = 0;
