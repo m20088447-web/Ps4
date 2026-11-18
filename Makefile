@@ -37,6 +37,13 @@ COMMON_CXXFLAGS := --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables \
                    -O2 -Wall -Wextra -Wno-unused-parameter \
                    -isysroot $(TOOLCHAIN) -isystem $(TOOLCHAIN)/include \
                    -isystem $(TOOLCHAIN)/include/c++/v1 -isystem $(SDL_INC) -Iinclude -std=c++17
+# Detect which network sysmodule names the toolchain header defines (names differ between releases).
+SYSMODULE_PROBE = $(shell printf '\043include <orbis/Sysmodule.h>\nint v = %s;\n' $(1) | $(CCX) $(COMMON_CXXFLAGS) -x c++ -fsyntax-only - >/dev/null 2>&1 && echo 1)
+HAVE_NET  := $(call SYSMODULE_PROBE,ORBIS_SYSMODULE_NET)
+HAVE_SSL  := $(call SYSMODULE_PROBE,ORBIS_SYSMODULE_SSL)
+HAVE_HTTP := $(call SYSMODULE_PROBE,ORBIS_SYSMODULE_HTTP)
+$(info Sysmodule names found: NET=$(HAVE_NET) SSL=$(HAVE_SSL) HTTP=$(HAVE_HTTP))
+COMMON_CXXFLAGS += $(if $(HAVE_NET),-DHAVE_SYSMODULE_NET) $(if $(HAVE_SSL),-DHAVE_SYSMODULE_SSL) $(if $(HAVE_HTTP),-DHAVE_SYSMODULE_HTTP)
 LDFLAGS     := -m elf_x86_64 -pie --script $(TOOLCHAIN)/link.x --eh-frame-hdr \
                -L$(TOOLCHAIN)/lib $(if $(SDL_LIBDIR),-L$(SDL_LIBDIR)) $(LIBS) $(TOOLCHAIN)/lib/crt1.o
 OBJECTS     := $(INTDIR)/main.o

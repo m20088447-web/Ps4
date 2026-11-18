@@ -71,6 +71,8 @@ bool g_running = true;
 std::string g_status = "Select Start Receiver to discover an Android sender.";
 std::string g_phoneIp;
 std::string g_probe;
+std::string g_moduleInfo;
+std::string g_detail;
 struct LinkEntry {
     std::string name;
     std::string url;
@@ -218,6 +220,8 @@ void drawReceiver() {
     drawText("CIRCLE TO STOP LISTENING", 114, 795, 1, Rgb{128, 155, 177});
     drawText(g_status, 114, 875, 1, Rgb{117, 145, 167});
     if (!g_probe.empty()) drawText(g_probe, 114, 835, 1, Rgb{117, 145, 167});
+    if (!g_detail.empty()) drawText("TRIES (URITYPE/SRCTYPE=CODE): " + g_detail.substr(0, 260), 114, 905, 1, Rgb{117, 145, 167});
+    drawText(g_moduleInfo, 114, 935, 1, Rgb{117, 145, 167});
 }
 
 std::string trimText(const std::string &input) {
@@ -298,7 +302,9 @@ void drawLinks() {
     }
     drawText("X  PLAY    CIRCLE  BACK    DPAD OR LEFT STICK  SELECT", 114, 795, 1, Rgb{128, 155, 177});
     drawText(g_status, 114, 875, 1, Rgb{117, 145, 167});
-    drawText("CONTROLLER: " + g_controllerName, 112, 952, 1, Rgb{0, 217, 245});
+    if (!g_detail.empty()) drawText("TRIES (URITYPE/SRCTYPE=CODE): " + clipText(g_detail, 260), 114, 905, 1, Rgb{117, 145, 167});
+    drawText(g_moduleInfo, 114, 935, 1, Rgb{117, 145, 167});
+    drawText("CONTROLLER: " + g_controllerName, 112, 975, 1, Rgb{0, 217, 245});
 }
 
 void stopPlayer() {
@@ -449,6 +455,7 @@ bool openSource(const std::string &sourceUrl, bool looksLikeHls, const std::stri
     int usedSourceType = -1;
     bool usedSimple = false;
     int attempts = 0;
+    g_detail.clear();
     if (sceAvPlayerAddSource) {
         ++attempts;
         result = sceAvPlayerAddSource(g_player, url);
@@ -470,6 +477,12 @@ bool openSource(const std::string &sourceUrl, bool looksLikeHls, const std::stri
             if (attempts == 1 || (attempts == 2 && sceAvPlayerAddSource)) firstResult = result;
             printf("AddSourceEx uriType=%d sourceType=%d -> 0x%08x\n", kUriTypes[u], kSourceTypes[t],
                    static_cast<unsigned>(result));
+            {
+                char piece[40];
+                snprintf(piece, sizeof(piece), "%d/%d=%X ", kUriTypes[u], kSourceTypes[t],
+                         static_cast<unsigned>(result) & 0xFFFFu);
+                g_detail += piece;
+            }
             if (result >= 0) {
                 usedUriType = kUriTypes[u];
                 usedSourceType = kSourceTypes[t];
@@ -854,7 +867,30 @@ void handleInput() {
 
 int main(int, char **) {
     setvbuf(stdout, nullptr, _IONBF, 0);
-    sceSysmoduleLoadModule(ORBIS_SYSMODULE_AV_PLAYER);
+    // The AvPlayer streams http:// sources through the console's network modules, so load
+    // them first (names are detected at build time; missing names are simply skipped).
+    {
+        char info[200];
+        int written = snprintf(info, sizeof(info), "MODULES");
+#ifdef HAVE_SYSMODULE_NET
+        written += snprintf(info + written, sizeof(info) - written, " NET %08X", static_cast<unsigned>(sceSysmoduleLoadModule(ORBIS_SYSMODULE_NET)));
+#else
+        written += snprintf(info + written, sizeof(info) - written, " NET -");
+#endif
+#ifdef HAVE_SYSMODULE_SSL
+        written += snprintf(info + written, sizeof(info) - written, " SSL %08X", static_cast<unsigned>(sceSysmoduleLoadModule(ORBIS_SYSMODULE_SSL)));
+#else
+        written += snprintf(info + written, sizeof(info) - written, " SSL -");
+#endif
+#ifdef HAVE_SYSMODULE_HTTP
+        written += snprintf(info + written, sizeof(info) - written, " HTTP %08X", static_cast<unsigned>(sceSysmoduleLoadModule(ORBIS_SYSMODULE_HTTP)));
+#else
+        written += snprintf(info + written, sizeof(info) - written, " HTTP -");
+#endif
+        written += snprintf(info + written, sizeof(info) - written, " AV %08X", static_cast<unsigned>(sceSysmoduleLoadModule(ORBIS_SYSMODULE_AV_PLAYER)));
+        g_moduleInfo = info;
+        printf("%s\n", info);
+    }
     sceNetInit();
     sceNetCtlInit();
 
