@@ -26,7 +26,9 @@ extern "C" int sceNetInit(void);
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -45,6 +47,7 @@ enum Page {
     PAGE_HOME,
     PAGE_SETTINGS,
     PAGE_RECEIVER,
+    PAGE_LINKS,
     PAGE_PLAYING
 };
 
@@ -67,6 +70,20 @@ uint32_t g_fpsWindowStart = 0;
 bool g_running = true;
 std::string g_status = "Select Start Receiver to discover an Android sender.";
 std::string g_phoneIp;
+std::string g_probe;
+struct LinkEntry {
+    std::string name;
+    std::string url;
+};
+std::vector<LinkEntry> g_links;
+std::string g_linksSource;
+int g_linkSelected = 0;
+Page g_returnPage = PAGE_HOME;
+SDL_AudioDeviceID g_audioDevice = 0;
+int g_audioRate = 0;
+int g_audioChannels = 0;
+bool g_audioUnavailable = false;
+uint32_t g_nextAttemptMs = 0;
 std::string g_controllerName = "NO CONTROLLER CONNECTED";
 std::vector<uint32_t> g_argb;
 
@@ -151,8 +168,8 @@ void drawHome() {
     fillRect(112, 214, 1696, 2, Rgb{24, 54, 72});
     drawText("PS4 RECEIVER", 112, 268, 2, Rgb{232, 242, 250});
 
-    const char *items[] = {"START RECEIVER", "SETTINGS AND CONNECTION INFO", "EXIT"};
-    for (int i = 0; i < 3; ++i) {
+    const char *items[] = {"START RECEIVER", "PLAY LINK", "SETTINGS AND CONNECTION INFO", "EXIT"};
+    for (int i = 0; i < 4; ++i) {
         const int y = 338 + i * 105;
         drawPanel(112, y, 820, 78, g_selected == i);
         drawText(items[i], 146, y + 27, 2, g_selected == i ? Rgb{245, 251, 255} : Rgb{162, 186, 203});
@@ -182,7 +199,7 @@ void drawSettings() {
     drawText("DISCOVERY: UDP 39394 BROADCAST", 154, 386, 2, Rgb{192, 211, 226});
     drawText("STREAM: HLS OVER HTTP PORT 8088", 154, 436, 2, Rgb{192, 211, 226});
     drawText("VIDEO: H.264 VIA PS4 AVPLAYER", 154, 486, 2, Rgb{192, 211, 226});
-    drawText("AUDIO: NOT IMPLEMENTED", 154, 536, 2, Rgb{192, 211, 226});
+    drawText("AUDIO: DECODED BY AVPLAYER, PLAYED VIA SDL", 154, 536, 2, Rgb{192, 211, 226});
     drawText("CHOOSE RESOLUTION AND FPS IN THE ANDROID APP.", 154, 610, 1, Rgb{125, 153, 175});
     drawText("CONTROLLER: " + g_controllerName, 154, 644, 1, Rgb{0, 217, 245});
     drawText("PRESS CIRCLE TO RETURN", 114, 795, 1, Rgb{128, 155, 177});
@@ -200,9 +217,97 @@ void drawReceiver() {
     drawText("PS4 IP: " + ps4IpAddress(), 160, 548, 2, Rgb{0, 217, 245});
     drawText("CIRCLE TO STOP LISTENING", 114, 795, 1, Rgb{128, 155, 177});
     drawText(g_status, 114, 875, 1, Rgb{117, 145, 167});
+    if (!g_probe.empty()) drawText(g_probe, 114, 835, 1, Rgb{117, 145, 167});
+}
+
+std::string trimText(const std::string &input) {
+    size_t begin = 0;
+    size_t end = input.size();
+    while (begin < end && (input[begin] == ' ' || input[begin] == '\t' || input[begin] == '\r' || input[begin] == '\n')) ++begin;
+    while (end > begin && (input[end - 1] == ' ' || input[end - 1] == '\t' || input[end - 1] == '\r' || input[end - 1] == '\n')) --end;
+    return input.substr(begin, end - begin);
+}
+
+// Links come from a text file, one per line: "Name | http://..." or just "http://...".
+// Lines starting with # are ignored. The first file that exists is used.
+void loadLinks() {
+    static const char *const kLinkFiles[] = {
+        "/mnt/usb0/phonecast_links.txt", "/mnt/usb1/phonecast_links.txt",
+        "/mnt/usb0/PhoneCast/links.txt", "/mnt/usb1/PhoneCast/links.txt",
+        "/data/phonecast_links.txt", "/data/PhoneCast/links.txt",
+    };
+    g_links.clear();
+    g_linksSource.clear();
+    g_linkSelected = 0;
+    for (const char *path : kLinkFiles) {
+        FILE *file = fopen(path, "r");
+        if (!file) continue;
+        g_linksSource = path;
+        char line[1024];
+        while (fgets(line, sizeof(line), file) && g_links.size() < 200) {
+            const std::string text = trimText(line);
+            if (text.empty() || text[0] == '#') continue;
+            LinkEntry entry;
+            const size_t bar = text.find('|');
+            if (bar != std::string::npos) {
+                entry.name = trimText(text.substr(0, bar));
+                entry.url = trimText(text.substr(bar + 1));
+            } else {
+                entry.url = text;
+            }
+            if (entry.url.compare(0, 7, "http://") != 0 && entry.url.compare(0, 8, "https://") != 0) continue;
+            if (entry.name.empty()) entry.name = entry.url;
+            g_links.push_back(entry);
+        }
+        fclose(file);
+        if (!g_links.empty()) return;
+    }
+}
+
+std::string clipText(const std::string &text, size_t maxChars) {
+    return text.size() <= maxChars ? text : text.substr(0, maxChars - 2) + "..";
+}
+
+void drawLinks() {
+    fillRect(0, 0, kWidth, kHeight, Rgb{7, 15, 24});
+    fillRect(0, 0, kWidth, 10, Rgb{0, 217, 245});
+    drawText("PLAY LINK", 112, 98, 4, Rgb{0, 217, 245});
+    if (g_links.empty()) {
+        drawPanel(112, 210, 1696, 460, false);
+        drawText("NO LINKS FOUND", 154, 254, 2, Rgb{232, 242, 250});
+        drawText("CREATE A TEXT FILE NAMED PHONECAST_LINKS.TXT IN THE ROOT OF THE USB DRIVE.", 154, 320, 1, Rgb{178, 199, 216});
+        drawText("WRITE ONE LINK PER LINE, FOR EXAMPLE:", 154, 360, 1, Rgb{178, 199, 216});
+        drawText("MY CHANNEL | HTTP://SERVER:8000/PATH/STREAM.M3U8", 154, 400, 1, Rgb{0, 217, 245});
+        drawText("HTTP://192.168.1.5:8088/LIVE/PHONE/PHONE/1.TS", 154, 434, 1, Rgb{0, 217, 245});
+        drawText("LINES STARTING WITH # ARE IGNORED. THEN OPEN THIS PAGE AGAIN.", 154, 484, 1, Rgb{178, 199, 216});
+        drawText(g_linksSource.empty() ? "FILE: NOT FOUND ON USB OR /DATA" : "FILE: " + g_linksSource + " (NO VALID LINKS)",
+                 154, 560, 1, Rgb{125, 153, 175});
+    } else {
+        const int visible = 6;
+        const int count = static_cast<int>(g_links.size());
+        const int first = g_linkSelected >= visible ? g_linkSelected - visible + 1 : 0;
+        for (int i = 0; i < visible && first + i < count; ++i) {
+            const int index = first + i;
+            const int y = 200 + i * 86;
+            drawPanel(112, y, 1696, 72, g_linkSelected == index);
+            drawText(clipText(g_links[index].name, 70), 146, y + 12, 2, g_linkSelected == index ? Rgb{245, 251, 255} : Rgb{162, 186, 203});
+            drawText(clipText(g_links[index].url, 130), 146, y + 46, 1, Rgb{125, 153, 175});
+        }
+        drawText("LINK " + std::to_string(g_linkSelected + 1) + " OF " + std::to_string(count) + "   FILE: " + g_linksSource,
+                 114, 740, 1, Rgb{125, 153, 175});
+    }
+    drawText("X  PLAY    CIRCLE  BACK    DPAD OR LEFT STICK  SELECT", 114, 795, 1, Rgb{128, 155, 177});
+    drawText(g_status, 114, 875, 1, Rgb{117, 145, 167});
+    drawText("CONTROLLER: " + g_controllerName, 112, 952, 1, Rgb{0, 217, 245});
 }
 
 void stopPlayer() {
+    if (g_audioDevice) {
+        SDL_CloseAudioDevice(g_audioDevice);
+        g_audioDevice = 0;
+    }
+    g_audioRate = g_audioChannels = 0;
+    g_audioUnavailable = false;
     if (g_player) {
         sceAvPlayerStop(g_player);
         sceAvPlayerClose(g_player);
@@ -241,7 +346,78 @@ void avDeallocateTexture(void *arg, void *ptr) {
     avDeallocate(arg, ptr);
 }
 
-bool beginPlayer(const std::string &phoneIp) {
+// Fetch the playlist ourselves so the screen can show whether the phone's HLS
+// server is reachable and what it serves (separate from AvPlayer problems).
+std::string probePlaylist(const std::string &phoneIp) {
+    const int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return "PLAYLIST TEST: NO SOCKET";
+    const int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+    sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_port = htons(kHttpPort);
+    inet_pton(AF_INET, phoneIp.c_str(), &address.sin_addr);
+
+    std::string result;
+    int rc = connect(fd, reinterpret_cast<sockaddr *>(&address), sizeof(address));
+    if (rc < 0 && errno != EINPROGRESS) {
+        char text[96];
+        snprintf(text, sizeof(text), "PLAYLIST TEST: CONNECT FAILED (ERRNO %d)", errno);
+        close(fd);
+        return text;
+    }
+    fd_set writeSet;
+    FD_ZERO(&writeSet);
+    FD_SET(fd, &writeSet);
+    timeval timeout{2, 0};
+    if (select(fd + 1, nullptr, &writeSet, nullptr, &timeout) <= 0) {
+        close(fd);
+        return "PLAYLIST TEST: PHONE NOT REACHABLE ON PORT 8088 (TIMEOUT)";
+    }
+    int socketError = 0;
+    socklen_t errorLength = sizeof(socketError);
+    getsockopt(fd, SOL_SOCKET, SO_ERROR, &socketError, &errorLength);
+    if (socketError != 0) {
+        char text[96];
+        snprintf(text, sizeof(text), "PLAYLIST TEST: CONNECT REFUSED (ERRNO %d)", socketError);
+        close(fd);
+        return text;
+    }
+    if (flags >= 0) fcntl(fd, F_SETFL, flags);
+    timeval ioTimeout{2, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &ioTimeout, sizeof(ioTimeout));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &ioTimeout, sizeof(ioTimeout));
+
+    const std::string request = "GET /phonecast.m3u8 HTTP/1.0\r\nHost: " + phoneIp + "\r\n\r\n";
+    send(fd, request.c_str(), request.size(), 0);
+    std::string response;
+    char buffer[512];
+    while (response.size() < 4096) {
+        const ssize_t n = recv(fd, buffer, sizeof(buffer), 0);
+        if (n <= 0) break;
+        response.append(buffer, static_cast<size_t>(n));
+    }
+    close(fd);
+
+    int segments = 0;
+    for (size_t pos = response.find("#EXTINF"); pos != std::string::npos; pos = response.find("#EXTINF", pos + 1)) ++segments;
+    const bool isPlaylist = response.find("#EXTM3U") != std::string::npos;
+    char text[128];
+    if (response.empty()) {
+        snprintf(text, sizeof(text), "PLAYLIST TEST: CONNECTED BUT EMPTY REPLY");
+    } else {
+        std::string statusLine = response.substr(0, response.find('\r'));
+        for (char &c : statusLine) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 32);
+        snprintf(text, sizeof(text), "PLAYLIST TEST: %.40s, %s, %d SEGMENTS", statusLine.c_str(),
+                 isPlaylist ? "VALID M3U8" : "NOT M3U8", segments);
+    }
+    return text;
+}
+
+// Opens any http(s) URL with the PS4 AvPlayer and switches to the playing page.
+bool openSource(const std::string &sourceUrl, bool looksLikeHls, const std::string &label, Page returnPage) {
     stopPlayer();
     SceAvPlayerInitData init;
     memset(&init, 0, sizeof(init));
@@ -261,13 +437,14 @@ bool beginPlayer(const std::string &phoneIp) {
         return false;
     }
     // AvPlayer may keep the URL pointer, so give it storage that outlives this call.
-    static char url[128];
-    snprintf(url, sizeof(url), "http://%s:%u/phonecast.m3u8", phoneIp.c_str(), kHttpPort);
+    static char url[512];
+    snprintf(url, sizeof(url), "%s", sourceUrl.c_str());
 
     // The exact AddSourceEx argument values differ between documentation and
     // firmware, so try the plain AddSource (if the toolchain stub has it) and
     // then each known uriType/sourceType combination until one is accepted.
     int32_t result = -1;
+    int32_t firstResult = -1;
     int usedUriType = -1;
     int usedSourceType = -1;
     bool usedSimple = false;
@@ -278,9 +455,11 @@ bool beginPlayer(const std::string &phoneIp) {
         usedSimple = result >= 0;
     }
     static const int kUriTypes[] = {0, 1, 2};
-    static const int kSourceTypes[] = {PHONECAST_AVPLAYER_SOURCE_HLS, 0, 3, 2, 1, 4, 5, 6, 7, 9};
+    static const int kHlsFirst[] = {PHONECAST_AVPLAYER_SOURCE_HLS, 0, 3, 2, 1, 4, 5, 6, 7, 9};
+    static const int kOtherFirst[] = {0, 1, PHONECAST_AVPLAYER_SOURCE_HLS, 2, 3, 4, 5, 6, 7, 9};
+    const int *kSourceTypes = looksLikeHls ? kHlsFirst : kOtherFirst;
     for (size_t u = 0; result < 0 && u < sizeof(kUriTypes) / sizeof(kUriTypes[0]); ++u) {
-        for (size_t t = 0; result < 0 && t < sizeof(kSourceTypes) / sizeof(kSourceTypes[0]); ++t) {
+        for (size_t t = 0; result < 0 && t < 10; ++t) {
             SceAvPlayerSourceDetails details;
             memset(&details, 0, sizeof(details));
             details.uri.name = url;
@@ -288,6 +467,7 @@ bool beginPlayer(const std::string &phoneIp) {
             details.sourceType = kSourceTypes[t];
             ++attempts;
             result = sceAvPlayerAddSourceEx(g_player, kUriTypes[u], &details);
+            if (attempts == 1 || (attempts == 2 && sceAvPlayerAddSource)) firstResult = result;
             printf("AddSourceEx uriType=%d sourceType=%d -> 0x%08x\n", kUriTypes[u], kSourceTypes[t],
                    static_cast<unsigned>(result));
             if (result >= 0) {
@@ -299,8 +479,8 @@ bool beginPlayer(const std::string &phoneIp) {
     if (result < 0) {
         char message[160];
         snprintf(message, sizeof(message),
-                 "Could not open the Android HLS playlist (last 0x%08x after %d tries).",
-                 static_cast<unsigned>(result), attempts);
+                 "AvPlayer rejected the stream (first 0x%08x, last 0x%08x, %d tries).",
+                 static_cast<unsigned>(firstResult), static_cast<unsigned>(result), attempts);
         g_status = message;
         printf("%s\n", message);
         stopPlayer();
@@ -309,12 +489,28 @@ bool beginPlayer(const std::string &phoneIp) {
     char how[64];
     if (usedSimple) snprintf(how, sizeof(how), "AddSource");
     else snprintf(how, sizeof(how), "Ex type %d/%d", usedUriType, usedSourceType);
-    g_phoneIp = phoneIp;
-    g_status = "Connecting to " + phoneIp + " (" + how + ")";
+    g_phoneIp = label;
+    g_status = "Opening " + label + " (" + how + ")";
+    g_returnPage = returnPage;
     g_page = PAGE_PLAYING;
     g_fpsWindowStart = SDL_GetTicks();
     g_frames = 0;
     return true;
+}
+
+bool beginPlayer(const std::string &phoneIp) {
+    g_probe = probePlaylist(phoneIp);
+    printf("%s\n", g_probe.c_str());
+    char url[128];
+    snprintf(url, sizeof(url), "http://%s:%u/phonecast.m3u8", phoneIp.c_str(), kHttpPort);
+    const bool opened = openSource(url, true, phoneIp, PAGE_HOME);
+    if (!opened) g_nextAttemptMs = SDL_GetTicks() + 8000;  // do not hammer the player every second
+    return opened;
+}
+
+void playLink(const LinkEntry &entry) {
+    const bool hls = entry.url.find(".m3u8") != std::string::npos;
+    openSource(entry.url, hls, clipText(entry.name, 60), PAGE_LINKS);
 }
 
 bool initDiscovery() {
@@ -358,6 +554,7 @@ void checkForAndroid() {
 
     char ip[INET_ADDRSTRLEN];
     if (!inet_ntop(AF_INET, &source.sin_addr, ip, sizeof(ip))) return;
+    if (static_cast<int32_t>(SDL_GetTicks() - g_nextAttemptMs) < 0) return;
     g_status = std::string("Found Android sender: ") + ip;
     beginPlayer(ip);
 }
@@ -396,11 +593,69 @@ void convertNv12ToArgb(const uint8_t *yPlane, const uint8_t *uvPlane, int width,
         SDL_UpdateTexture(g_videoTexture, nullptr, g_argb.data(), width * static_cast<int>(sizeof(uint32_t)));
 }
 
+bool openAudio(int rate, int channels) {
+    if (g_audioDevice && g_audioRate == rate && g_audioChannels == channels) return true;
+    if (g_audioUnavailable) return false;
+    if (g_audioDevice) {
+        SDL_CloseAudioDevice(g_audioDevice);
+        g_audioDevice = 0;
+    }
+    if (!(SDL_WasInit(SDL_INIT_AUDIO) & SDL_INIT_AUDIO) && SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
+        printf("SDL audio init failed: %s\n", SDL_GetError());
+        g_audioUnavailable = true;
+        return false;
+    }
+    SDL_AudioSpec want;
+    SDL_AudioSpec have;
+    memset(&want, 0, sizeof(want));
+    memset(&have, 0, sizeof(have));
+    want.freq = rate;
+    want.format = AUDIO_S16SYS;
+    want.channels = static_cast<Uint8>(channels);
+    want.samples = 1024;
+    g_audioDevice = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
+    if (g_audioDevice == 0) {
+        printf("SDL_OpenAudioDevice failed: %s\n", SDL_GetError());
+        g_audioUnavailable = true;
+        return false;
+    }
+    g_audioRate = rate;
+    g_audioChannels = channels;
+    SDL_PauseAudioDevice(g_audioDevice, 0);
+    printf("Audio output opened: %d Hz, %d channels\n", rate, channels);
+    return true;
+}
+
+// AvPlayer stalls when its decoded audio is never consumed, so always drain it.
+void pumpAudio() {
+    if (!g_player || !sceAvPlayerGetAudioData) return;
+    alignas(16) uint8_t info[512];
+    for (int i = 0; i < 8; ++i) {
+        memset(info, 0, sizeof(info));
+        if (!sceAvPlayerGetAudioData(g_player, info)) break;
+        void *data = nullptr;
+        uint16_t channels = 0;
+        uint32_t rate = 0;
+        uint32_t size = 0;
+        memcpy(&data, info, sizeof(data));
+        memcpy(&channels, info + 24, sizeof(channels));
+        memcpy(&rate, info + 28, sizeof(rate));
+        memcpy(&size, info + 32, sizeof(size));
+        if (!data || size == 0 || channels == 0 || channels > 8 || rate < 8000 || rate > 192000) break;
+        if (!openAudio(static_cast<int>(rate), static_cast<int>(channels))) break;
+        // Keep delay bounded: drop audio when more than about a second is already queued.
+        const uint32_t queued = SDL_GetQueuedAudioSize(g_audioDevice);
+        if (queued < rate * channels * 2) SDL_QueueAudio(g_audioDevice, data, size);
+    }
+}
+
 void updatePlayer() {
     if (!g_player || !sceAvPlayerIsActive(g_player)) return;
+    pumpAudio();
     SceAvPlayerFrameInfoEx frame;
     memset(&frame, 0, sizeof(frame));
-    if (sceAvPlayerGetVideoDataEx(g_player, &frame) != 0 || !frame.pData) return;
+    sceAvPlayerGetVideoDataEx(g_player, &frame);  // fills pData only when a new frame is ready
+    if (!frame.pData) return;
     const int width = static_cast<int>(frame.details.video.width);
     const int height = static_cast<int>(frame.details.video.height);
     int pitch = static_cast<int>(frame.details.video.pitch);
@@ -422,11 +677,11 @@ void updatePlayer() {
 void drawVideo() {
     fillRect(0, 0, kWidth, kHeight, Rgb{0, 0, 0});
     if (!g_videoTexture || g_videoWidth <= 0 || g_videoHeight <= 0) {
-        drawText("CONNECTING TO ANDROID", 112, 112, 3, Rgb{0, 217, 245});
+        drawText("OPENING STREAM", 112, 112, 3, Rgb{0, 217, 245});
         drawText(g_status, 112, 180, 1, Rgb{215, 229, 239});
         const bool active = g_player && sceAvPlayerIsActive(g_player);
         drawText(std::string("AVPLAYER: ") + (active ? "ACTIVE, WAITING FOR VIDEO" : "NOT ACTIVE") +
-                 "   PHONE: " + g_phoneIp, 112, 230, 1, Rgb{153, 177, 196});
+                 "   SOURCE: " + g_phoneIp, 112, 230, 1, Rgb{153, 177, 196});
         drawText("CIRCLE TO RETURN TO MENU", 112, 980, 1, Rgb{125, 153, 175});
         return;
     }
@@ -445,7 +700,10 @@ void drawVideo() {
 
 void navigate(int direction) {
     if (g_page == PAGE_HOME) {
-        g_selected = (g_selected + direction + 3) % 3;
+        g_selected = (g_selected + direction + 4) % 4;
+    } else if (g_page == PAGE_LINKS && !g_links.empty()) {
+        const int count = static_cast<int>(g_links.size());
+        g_linkSelected = (g_linkSelected + direction + count) % count;
     }
 }
 
@@ -490,17 +748,20 @@ void applyControllerAction(Ds4Action action) {
             activateSelection();
             break;
         case Ds4Action::Back:
-            if (g_page == PAGE_SETTINGS) {
+            if (g_page == PAGE_SETTINGS || g_page == PAGE_LINKS) {
                 g_page = PAGE_HOME;
-            } else if (g_page == PAGE_RECEIVER || g_page == PAGE_PLAYING) {
+            } else if (g_page == PAGE_RECEIVER) {
                 stopPlayer();
                 g_page = PAGE_HOME;
+            } else if (g_page == PAGE_PLAYING) {
+                stopPlayer();
+                g_page = g_returnPage;
             }
             break;
         case Ds4Action::Options:
             if (g_page == PAGE_PLAYING) {
                 stopPlayer();
-                g_page = PAGE_HOME;
+                g_page = g_returnPage;
             }
             break;
         case Ds4Action::None:
@@ -550,9 +811,18 @@ void activateSelection() {
                 g_status = "Listening for PHONECAST_HLS/1 advertisements.";
             }
         } else if (g_selected == 1) {
+            loadLinks();
+            g_status = "Select a link and press X to play it.";
+            g_page = PAGE_LINKS;
+        } else if (g_selected == 2) {
             g_page = PAGE_SETTINGS;
         } else {
             g_running = false;
+        }
+    } else if (g_page == PAGE_LINKS) {
+        if (!g_links.empty()) {
+            g_status = "Opening link...";
+            playLink(g_links[g_linkSelected]);
         }
     }
 }
@@ -566,10 +836,13 @@ void handleInput() {
             else if (event.key.keysym.sym == SDLK_DOWN) navigate(1);
             else if (event.key.keysym.sym == SDLK_RETURN || event.key.keysym.sym == SDLK_x) activateSelection();
             else if (event.key.keysym.sym == SDLK_ESCAPE || event.key.keysym.sym == SDLK_BACKSPACE) {
-                if (g_page == PAGE_SETTINGS) g_page = PAGE_HOME;
-                else if (g_page == PAGE_RECEIVER || g_page == PAGE_PLAYING) {
+                if (g_page == PAGE_SETTINGS || g_page == PAGE_LINKS) g_page = PAGE_HOME;
+                else if (g_page == PAGE_RECEIVER) {
                     stopPlayer();
                     g_page = PAGE_HOME;
+                } else if (g_page == PAGE_PLAYING) {
+                    stopPlayer();
+                    g_page = g_returnPage;
                 } else g_running = false;
             }
         }
@@ -623,6 +896,7 @@ int main(int, char **) {
         if (g_page == PAGE_HOME) drawHome();
         else if (g_page == PAGE_SETTINGS) drawSettings();
         else if (g_page == PAGE_RECEIVER) drawReceiver();
+        else if (g_page == PAGE_LINKS) drawLinks();
         else drawVideo();
 
         SDL_RenderPresent(g_renderer);

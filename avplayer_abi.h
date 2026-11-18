@@ -105,7 +105,10 @@ SceAvPlayerHandle sceAvPlayerInit(SceAvPlayerInitData *data);
 int32_t sceAvPlayerAddSource(SceAvPlayerHandle handle, const char *url) __attribute__((weak));
 int32_t sceAvPlayerAddSourceEx(SceAvPlayerHandle handle, int32_t uriType, SceAvPlayerSourceDetails *details);
 int32_t sceAvPlayerClose(SceAvPlayerHandle handle);
-int32_t sceAvPlayerGetVideoDataEx(SceAvPlayerHandle handle, SceAvPlayerFrameInfoEx *frameInfo);
+uint8_t sceAvPlayerGetVideoDataEx(SceAvPlayerHandle handle, SceAvPlayerFrameInfoEx *frameInfo);
+// frameInfo is a SceAvPlayerFrameInfo (pData at +0, audio details at +24: u16 channels, u32 rate, u32 size).
+// Weak: if a toolchain stub lacks it the pointer is null and audio is skipped.
+uint8_t sceAvPlayerGetAudioData(SceAvPlayerHandle handle, void *frameInfo) __attribute__((weak));
 int32_t sceAvPlayerStop(SceAvPlayerHandle handle);
 uint8_t sceAvPlayerIsActive(SceAvPlayerHandle handle);
 

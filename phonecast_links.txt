@@ -1,0 +1,6 @@
+# PhoneCast links - one per line:  Name | http://...
+# Lines starting with # are ignored. Use http:// links (https may not work).
+# Replace PHONE-IP with the IP shown in the PhoneCast TV app on your phone.
+Phone screen (TS) | http://PHONE-IP:8088/live/phone/phone/1.ts
+Phone screen (HLS) | http://PHONE-IP:8088/phonecast.m3u8
+Test video (MP4) | http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4
